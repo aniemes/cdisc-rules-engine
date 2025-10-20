@@ -40,4 +40,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cdisc-core-windows
-          path: dist/output/core-windows/core/cdisc-core-*.exe
+          path: dist/output/core-windows/core/
