@@ -1,14 +1,6 @@
 name: Build Binary
 on:
   workflow_dispatch:
-  workflow_call:
-    inputs:
-      os:
-        required: true
-        type: string
-      name:
-        required: true
-        type: string
 jobs:
   build:
     runs-on: ${{ inputs.os }}
