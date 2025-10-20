@@ -29,14 +29,7 @@ jobs:
           python core.py update-cache
       - name: Build Binary
         run: |
-          pyinstaller --onedir \
-            core.py \
-            --dist ./dist/output/core-windows \
-            --collect-submodules pyreadstat \
-            --add-data="resources/cache:resources/cache" \
-            --add-data="resources/templates:resources/templates" \
-            --add-data="resources/schema:resources/schema" \
-            --add-data="tests/resources/datasets:tests/resources/datasets"
+            pyinstaller --onedir --contents-directory "." core.py --dist ./dist/output/core-windows --collect-submodules pyreadstat --add-data="resources/cache;resources/cache" --add-data="resources/templates;resources/templates" --add-data="resources/schema;resources/schema" --add-data="tests/resources/datasets;tests/resources/datasets"
       - name: Prepare executable
         run: |
           cd dist/output/core-windows/core
