@@ -6,7 +6,7 @@ on:
   #   - cron: '0 2 * * *'  # Daily at 2 AM UTC
 jobs:
   custom-executable-build:
-    runs-on: ubuntu-22.04
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,7 +32,7 @@ jobs:
           pyinstaller --onedir \
             --contents-directory "." \
             core.py \
-            --dist ./dist/output/core-ubuntu-22.04 \
+            --dist ./dist/output/core-windows \
             --collect-submodules pyreadstat \
             --add-data="resources/cache:resources/cache" \
             --add-data="resources/templates:resources/templates" \
@@ -40,7 +40,7 @@ jobs:
             --add-data="tests/resources/datasets:tests/resources/datasets"
       - name: Prepare executable
         run: |
-          cd dist/output/core-ubuntu-22.04/core
+          cd dist/output/core-windows/core
           chmod +x core
           file core  # Verify x86_64 architecture
           mv core cdisc-core-$(date +%Y%m%d)
@@ -48,5 +48,5 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cdisc-core-ubuntu-22.04
-          path: dist/output/core-ubuntu-22.04/core/cdisc-core-*
+          name: cdisc-core-windows
+          path: dist/output/core-windows/core/cdisc-core-*
