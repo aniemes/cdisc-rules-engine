@@ -30,7 +30,6 @@ jobs:
       - name: Build Binary
         run: |
           pyinstaller --onedir \
-            --contents-directory "." \
             core.py \
             --dist ./dist/output/core-windows \
             --collect-submodules pyreadstat \
