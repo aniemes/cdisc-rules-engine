@@ -1,11 +1,11 @@
-name: Build Custom Executable
+name: Build Custom Executable (Windows)
 on:
   workflow_dispatch:
   # schedule:
   #   - cron: '0 2 * * 0'  # Weekly on Sunday at 2 AM UTC
   #   - cron: '0 2 * * *'  # Daily at 2 AM UTC
 jobs:
-  custom-executable-build:
+  custom-executable-build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,18 +27,17 @@ jobs:
           CDISC_LIBRARY_API_KEY: ${{ secrets.CDISC_LIBRARY_API_KEY }}
         run: |
           python core.py update-cache
-      - name: Build Binary
-        run: |
-          pyinstaller --onedir core.py --dist ./dist/output/core-windows --collect-submodules pyreadstat --add-data="resources/cache;resources/cache" --add-data="resources/templates;resources/templates" --add-data="resources/schema;resources/schema" --add-data="tests/resources/datasets;tests/resources/datasets"
-      - name: Prepare executable
+      - name: Build Binary (Windows)
+        run: pyinstaller --onedir core.py --dist ./dist/output/core-windows --collect-submodules pyreadstat --add-data="resources/cache;resources/cache" --add-data="resources/templates;resources/templates" --add-data="resources/schema;resources/schema" --add-data="tests/resources/datasets;tests/resources/datasets"
+      - name: Prepare executable (Windows)
+        shell: pwsh
         run: |
           cd dist/output/core-windows/core
-          chmod +x core
-          file core  # Verify x86_64 architecture
-          mv core cdisc-core-$(date +%Y%m%d)
-          echo "Executable ready: $(ls cdisc-core-*)"
+          $date = Get-Date -Format "yyyyMMdd"
+          Rename-Item core.exe "cdisc-core-$date.exe"
+          Write-Output "Executable ready: $(Get-ChildItem cdisc-core-*)"
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: cdisc-core-windows
-          path: dist/output/core-windows/core/cdisc-core-*
+          path: dist/output/core-windows/core/cdisc-core-*.exe
