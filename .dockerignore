@@ -1,0 +1,13 @@
+rules_engine/
+.venv/
+__pycache__/
+.pytest_cache/
+.git/
+.github/
+tests/
+*.pyc
+.env
+venv/
+local.settings.json
+.terminal_history.json
+CORE-Report*.xlsx
