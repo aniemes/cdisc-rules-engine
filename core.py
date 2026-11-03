@@ -7,7 +7,7 @@ import tempfile
 from datetime import datetime
 from multiprocessing import freeze_support
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import click
 
@@ -16,6 +16,7 @@ from cdisc_rules_engine.enums.dataformat_types import DataFormatTypes
 from cdisc_rules_engine.enums.default_file_paths import DefaultFilePaths
 from cdisc_rules_engine.enums.progress_parameter_options import ProgressParameterOptions
 from cdisc_rules_engine.enums.report_types import ReportTypes
+from cdisc_rules_engine.exceptions.custom_exceptions import DatabaseConnectionError
 from cdisc_rules_engine.models.external_dictionaries_container import (
     DictionaryTypes,
     ExternalDictionariesContainer,
@@ -23,6 +24,7 @@ from cdisc_rules_engine.models.external_dictionaries_container import (
 from cdisc_rules_engine.models.sql_external_dictionaries_container import SqlExternalDictionariesContainer
 from cdisc_rules_engine.constants.rule_constants import MAX_ERRORS_PER_DATASET
 from cdisc_rules_engine.models.validation_args import Validation_args
+from cdisc_rules_engine.readers.codelist_reader import CodelistReader
 from cdisc_rules_engine.services.cache.cache_populator_service import CachePopulator
 from cdisc_rules_engine.services.cache.cache_service_factory import CacheServiceFactory
 from cdisc_rules_engine.services.cdisc_library_service import CDISCLibraryService
@@ -33,30 +35,36 @@ from cdisc_rules_engine.utilities.utils import (
 from scripts.list_dataset_metadata_handler import list_dataset_metadata_handler
 from scripts.run_sql_validation import run_sql_validation
 from scripts.run_validation import run_validation
+from scripts.sql_list_dataset_metadata_handler import sql_list_dataset_metadata_handler
 from version import __version__
 
+SQL_DATA_FORMATS = {DataFormatTypes.XPT.value, DataFormatTypes.SAS7BDAT.value}
 
-def valid_data_file(data_path: list, allow_sql_mixed_formats: bool = False) -> Tuple[list, set]:
-    allowed_formats = [format.value for format in DataFormatTypes]
+
+def valid_data_file(
+    data_path: list, sql_engine: bool = False, filetype: Optional[str] = None
+) -> Tuple[list, set, list]:
+    known_formats = {format.value for format in DataFormatTypes}
+    allowed_formats = SQL_DATA_FORMATS if sql_engine else known_formats
+    data_path = [file for file in data_path if not os.path.basename(file).startswith("._")]
+    if filetype:
+        data_path = [file for file in data_path if os.path.splitext(file)[1][1:].upper() == filetype.upper()]
     found_formats = set()
     file_list = []
+    unsupported = []
     for file in data_path:
         file_extension = os.path.splitext(file)[1][1:].upper()
         if file_extension in allowed_formats:
             found_formats.add(file_extension)
             file_list.append(file)
-    if len(found_formats) > 1:
-        allowed_sql_mix = {DataFormatTypes.XPT.value, DataFormatTypes.SAS7BDAT.value}
-        if allow_sql_mixed_formats and found_formats.issubset(allowed_sql_mix):
-            return file_list, found_formats
-        return [], found_formats
-    if len(found_formats) == 1:
-        return file_list, found_formats
-
-    return [], set()
+        elif file_extension in known_formats:
+            unsupported.append(file)
+    if len(found_formats) > 1 and not sql_engine:
+        return [], found_formats, unsupported
+    return file_list, found_formats, unsupported
 
 
-@click.group()
+@click.group(context_settings={"token_normalize_func": lambda token: token.replace("_", "-")})
 def cli():
     pass
 
@@ -80,6 +88,13 @@ def cli():
     "--data",
     required=False,
     help="Path to directory containing data files",
+)
+@click.option(
+    "-ft",
+    "--filetype",
+    default=None,
+    type=click.Choice([data_format.lower() for data_format in sorted(SQL_DATA_FORMATS)], case_sensitive=False),
+    help="Only validate dataset files with this extension, e.g. when the data directory holds both XPT and SAS7BDAT",
 )
 @click.option(
     "-dp",
@@ -163,14 +178,20 @@ def cli():
 @click.option("--loinc", help="Path to directory with LOINC dictionary files")
 @click.option("--medrt", help="Path to directory with MEDRT dictionary files")
 @click.option("--unii", help="Path to directory with UNII dictionary files")
-@click.option("--snomed-version", help="Version of snomed to use.")
+@click.option("--snomed-version", help="Version of snomed to use. Only used with --cdisc.")
 @click.option(
     "--snomed-url",
-    help="The Base URL of snomed to use. Defaults to snowstorm test instance",
+    help="The Base URL of snomed to use. Defaults to snowstorm test instance. Only used with --cdisc.",
     default="https://snowstorm.snomedtools.org/snowstorm/snomed-ct/",
 )
-@click.option("--snomed-edition", help="Edition of snomed to use.")
-@click.option("--snomed", help="Path to directory with SNOMED dictionary files")
+@click.option("--snomed-edition", help="Edition of snomed to use. Only used with --cdisc.")
+@click.option(
+    "--snomed",
+    help=(
+        "Path to directory with SNOMED dictionary files. Only used by the SQL engine, "
+        "which reads the edition and version from the file names."
+    ),
+)
 @click.option(
     "--rules",
     "-r",
@@ -178,14 +199,20 @@ def cli():
     help="specify rule core ID ex. CORE-000001. Can be specified multiple times",
 )
 @click.option(
-    "--local_rules",
+    "--exclude-rules",
+    "-er",
+    multiple=True,
+    help="Specify rule core ID to exclude, ex. CORE-000001. Can be specified multiple times",
+)
+@click.option(
+    "--local-rules",
     "-lr",
     required=False,
     type=click.Path(exists=True, readable=True, resolve_path=True),
     help=("path to a local rule file or to a directory of local rules."),
 )
 @click.option(
-    "--custom_standard",
+    "--custom-standard",
     "-cs",
     required=False,
     is_flag=True,
@@ -212,11 +239,10 @@ def cli():
     help="Enable XML validation (default 'y' to enable, otherwise disable)",
 )
 @click.option(
-    "-sql",
-    "--sql-engine",
+    "--cdisc",
     is_flag=True,
     default=False,
-    help="Flag to run validation using the SQL engine",
+    help="Flag to run validation using the CDISC (pandas) engine instead of the default SQL engine",
 )
 @click.option(
     "-ns",
@@ -229,7 +255,10 @@ def cli():
     "--in-memory-postgres",
     is_flag=True,
     default=False,
-    help="Run validation using an in-memory Postgres instance",
+    help=(
+        "Run validation using an in-memory Postgres instance. "
+        "Used automatically when no DATABASE_* settings are found in the environment or .env file."
+    ),
 )
 @click.option(
     "--collapse-duplicate-issues",
@@ -256,6 +285,7 @@ def validate(  # noqa: C901
     cache: str,
     pool_size: int,
     data: str,
+    filetype: str,
     dataset_path: Tuple[str],
     log_level: str,
     report_template: str,
@@ -277,13 +307,14 @@ def validate(  # noqa: C901
     snomed_url: str,
     snomed: str,
     rules: Tuple[str],
+    exclude_rules: Tuple[str],
     local_rules: str,
     custom_standard: bool,
     progress: str,
     define_xml_path: str,
     stf_file_path: str,
     validate_xml: str,
-    sql_engine: bool,
+    cdisc: bool,
     sql_namespace: str,
     in_memory_postgres: bool,
     collapse_duplicate_issues: bool,
@@ -294,19 +325,72 @@ def validate(  # noqa: C901
 
     Example:
 
-    python core.py -s SDTM -v 3.4 -d /path/to/datasets
+    python core.py validate -s sdtmig -v 3-4 -d /path/to/datasets
     """
 
     # Validate conditional options
     logger = logging.getLogger("validator")
+    sql_engine = not cdisc
+
+    if cdisc:
+        if in_memory_postgres:
+            logger.warning("Flag --in-memory-postgres is ignored when --cdisc is used")
+        if snomed:
+            logger.warning("Argument --snomed is only used by the SQL engine and is ignored when --cdisc is used")
+    else:
+        snomed_api_options = [
+            f"--{name.replace('_', '-')}"
+            for name in ("snomed_version", "snomed_edition", "snomed_url")
+            if ctx.get_parameter_source(name) != click.core.ParameterSource.DEFAULT
+        ]
+        if snomed_api_options:
+            logger.warning(
+                f"{', '.join(snomed_api_options)} only apply to the CDISC engine (--cdisc) and are ignored. "
+                "The SQL engine reads SNOMED from the files passed with --snomed."
+            )
+        if not in_memory_postgres and not any(
+            os.getenv(var)
+            for var in ("DATABASE_HOST", "DATABASE_PORT", "DATABASE_NAME", "DATABASE_USER", "DATABASE_PASSWORD")
+        ):
+            logger.warning(
+                "No DATABASE_* settings found in the environment or .env file, "
+                "using an in-memory Postgres instance instead"
+            )
+            in_memory_postgres = True
 
     if raw_report is True:
         if not (len(output_format) == 1 and output_format[0] == ReportTypes.JSON.value):
             logger.error("Flag --raw-report can be used only when --output-format is JSON")
-            ctx.exit()
+            ctx.exit(1)
+
+    if rules and exclude_rules:
+        logger.error("Arguments --rules and --exclude-rules cannot be used together")
+        ctx.exit(1)
 
     cache_path: str = os.path.join(os.path.dirname(__file__), cache)
-    allowed_sql_mix = {DataFormatTypes.XPT.value, DataFormatTypes.SAS7BDAT.value}
+
+    # an unknown package would otherwise load as empty and silently pass the CT checks
+    # names are matched exactly as get_library_metadata_from_cache does (os.path.isfile ignores case on macOS/Windows)
+    cache_files = next(os.walk(cache_path), (None, None, []))[2]
+    ct_packages = {
+        file_name.split(".")[0] for file_name in cache_files if CodelistReader.FILENAME_PATTERN.match(file_name)
+    }
+    unknown_ct = sorted(set(controlled_terminology_package) - ct_packages)
+    if unknown_ct:
+        cached = {file_name.split(".")[0] for file_name in cache_files if "ct-" in file_name}
+        unsupported = [package for package in unknown_ct if package in cached]
+        missing = [package for package in unknown_ct if package not in cached]
+        if unsupported:
+            logger.error(
+                f"Controlled terminology package(s) not supported: {', '.join(unsupported)}. "
+                "Only SDTM and ADaM packages (sdtmct-*, adamct-*) can be used."
+            )
+        if missing:
+            logger.error(
+                f"Controlled terminology package(s) not found in the cache: {', '.join(missing)}. "
+                "Run `python core.py list-ct` to see the available packages."
+            )
+        ctx.exit(1)
 
     dict_container = SqlExternalDictionariesContainer if sql_engine else ExternalDictionariesContainer
     external_dictionaries = dict_container(
@@ -330,34 +414,35 @@ def validate(  # noqa: C901
     if data:
         if dataset_path:
             logger.error("Argument --dataset-path cannot be used together with argument --data")
-            ctx.exit()
-        dataset_paths, found_formats = valid_data_file(
-            [str(Path(data).joinpath(fn)) for fn in os.listdir(data)],
-            allow_sql_mixed_formats=sql_engine,
-        )
-        if len(found_formats) > 1:
-            if not (sql_engine and found_formats.issubset(allowed_sql_mix)):
-                logger.error(
-                    f"Argument --data contains more than one allowed file format ({', '.join(found_formats)}). "
-                    "Mixed formats are supported only for SQL engine runs and only for XPT + SAS7BDAT files."
-                )
-                ctx.exit()
+            ctx.exit(1)
+        candidate_paths = [str(Path(data).joinpath(fn)) for fn in os.listdir(data)]
     elif dataset_path:
-        dataset_paths, found_formats = valid_data_file(
-            [dp for dp in dataset_path],
-            allow_sql_mixed_formats=sql_engine,
-        )
-        if len(found_formats) > 1:
-            if not (sql_engine and found_formats.issubset(allowed_sql_mix)):
-                logger.error(
-                    f"Argument --dataset_path contains more than one allowed file format ({', '.join(found_formats)}). "
-                    "Mixed formats are supported only for SQL engine runs and only for XPT + SAS7BDAT files."
-                )
-                ctx.exit()
+        candidate_paths = list(dataset_path)
     else:
         logger.error("You must pass one of the following arguments: --dataset-path, --data")
         # no need to define dataset_paths here, the program execution will stop
-        ctx.exit()
+        ctx.exit(1)
+    dataset_paths, found_formats, unsupported_paths = valid_data_file(
+        candidate_paths, sql_engine=sql_engine, filetype=filetype
+    )
+    if unsupported_paths:
+        logger.warning(
+            "Skipping files the SQL engine can't read (it reads XPT and SAS7BDAT): "
+            + ", ".join(sorted(Path(path).name for path in unsupported_paths))
+        )
+    if len(found_formats) > 1 and not sql_engine:
+        logger.error(
+            f"The dataset files are in more than one format ({', '.join(sorted(found_formats))}). "
+            "Mixed formats are supported only for SQL engine runs and only for XPT + SAS7BDAT files."
+        )
+        ctx.exit(1)
+    if not dataset_paths:
+        logger.error(
+            "No dataset files to validate"
+            + (f" with the extension .{filetype.lower()}" if filetype else "")
+            + (". The SQL engine reads XPT and SAS7BDAT files." if sql_engine else ".")
+        )
+        ctx.exit(1)
     validate_xml_bool = True if validate_xml.lower() in ("y", "yes") else False
     args = Validation_args(
         cache_path,
@@ -384,9 +469,14 @@ def validate(  # noqa: C901
         sql_namespace,
         collapse_duplicate_issues,
         max_errors_per_dataset,
+        exclude_rules,
     )
     if sql_engine:
-        run_sql_validation(args, in_memory_postgres=in_memory_postgres)
+        try:
+            run_sql_validation(args, in_memory_postgres=in_memory_postgres)
+        except DatabaseConnectionError as e:
+            logger.error(e.message)
+            ctx.exit(1)
     else:
         run_validation(args)
 
@@ -394,30 +484,32 @@ def validate(  # noqa: C901
 @click.command()
 @click.option(
     "-c",
-    "--cache_path",
+    "--cache-path",
     default=DefaultFilePaths.CACHE.value,
     help="Relative path to cache files containing pre loaded metadata and rules",
 )
 @click.option(
     "--apikey",
     envvar="CDISC_LIBRARY_API_KEY",
-    help=("CDISC Library api key. " "Can be provided in the environment " "variable CDISC_LIBRARY_API_KEY"),
-    required=True,
+    help=(
+        "CDISC Library api key. Can be provided in the environment variable CDISC_LIBRARY_API_KEY. "
+        "Only needed to download the latest data from CDISC Library, not to manage custom rules and standards."
+    ),
 )
 @click.option(
     "-crd",
-    "--custom_rules_directory",
+    "--custom-rules-directory",
     help=("Relative path to directory containing local rules in yaml or JSON formats" "to be added to the cache. "),
 )
 @click.option(
     "-cr",
-    "--custom_rule",
+    "--custom-rule",
     multiple=True,
     help=("Relative path to rule file in yaml or JSON formats" "to be added to the cache. "),
 )
 @click.option(
     "-rcr",
-    "--remove_custom_rules",
+    "--remove-custom-rules",
     help=(
         "Remove rules from the cache. Can be a single rule ID, a comma-separated list of IDs, "
         "or 'ALL' to remove all custom rules."
@@ -425,12 +517,12 @@ def validate(  # noqa: C901
 )
 @click.option(
     "-ucr",
-    "--update_custom_rule",
+    "--update-custom-rule",
     help=("Relative path to rule file in yaml or JSON formats" "Rule will be updated in cache with this file. "),
 )
 @click.option(
     "-cs",
-    "--custom_standard",
+    "--custom-standard",
     help=(
         "Relative path to JSON file containing custom standard details."
         "Will update the standard if it already exists."
@@ -438,7 +530,7 @@ def validate(  # noqa: C901
 )
 @click.option(
     "-rcs",
-    "--remove_custom_standard",
+    "--remove-custom-standard",
     help=("removes a custom standard and version from the cache. "),
     multiple=True,
 )
@@ -478,6 +570,8 @@ def update_cache(
     elif remove_custom_standard:
         cache_populator.remove_custom_standards_from_cache()
     else:
+        if not apikey:
+            raise click.UsageError("Missing option '--apikey' (or the CDISC_LIBRARY_API_KEY environment variable).")
         report = asyncio.run(cache_populator.update_cache())
         print(report.summary())
         if not report.succeeded:
@@ -487,10 +581,18 @@ def update_cache(
     print("Cache updated successfully")
 
 
+def load_rules_cache_file(cache_path: str, file_name: str, custom: bool) -> dict:
+    path = os.path.join(cache_path, file_name)
+    if custom and os.path.isdir(cache_path) and not os.path.exists(path):
+        return {}
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+
 @click.command()
 @click.option(
     "-c",
-    "--cache_path",
+    "--cache-path",
     default=DefaultFilePaths.CACHE.value,
     help="Relative path to cache files containing pre loaded metadata and rules",
 )
@@ -505,7 +607,7 @@ def update_cache(
 )
 @click.option(
     "-cr",
-    "--custom_rules",
+    "--custom-rules",
     is_flag=True,
     default=False,
     required=False,
@@ -513,7 +615,7 @@ def update_cache(
 )
 @click.option(
     "-r",
-    "--rule_id",
+    "--rule-id",
     required=False,
     help="Rule ID to get rule for.",
     multiple=True,
@@ -535,10 +637,8 @@ def list_rules(
     else:
         rules_file = DefaultFilePaths.RULES_CACHE_FILE.value
         dict_file = DefaultFilePaths.RULES_DICTIONARY.value
-    with open(os.path.join(cache_path, rules_file), "rb") as f:
-        rules_data = pickle.load(f)
-    with open(os.path.join(cache_path, dict_file), "rb") as f:
-        rules_dict = pickle.load(f)
+    rules_data = load_rules_cache_file(cache_path, rules_file, custom_rules)
+    rules_dict = load_rules_cache_file(cache_path, dict_file, custom_rules)
     rules = []
     if rule_id:
         for id in rule_id:
@@ -560,7 +660,7 @@ def list_rules(
 @click.command()
 @click.option(
     "-c",
-    "--cache_path",
+    "--cache-path",
     default=DefaultFilePaths.CACHE.value,
     help="Relative path to cache files containing pre loaded metadata and rules",
 )
@@ -578,8 +678,7 @@ def list_rule_sets(ctx: click.Context, cache_path: str, custom: bool):
         rules_file = DefaultFilePaths.CUSTOM_RULES_DICTIONARY.value
     else:
         rules_file = DefaultFilePaths.RULES_DICTIONARY.value
-    with open(os.path.join(cache_path, rules_file), "rb") as f:
-        rules_data = pickle.load(f)
+    rules_data = load_rules_cache_file(cache_path, rules_file, custom)
 
     rule_sets = {}
     for key in rules_data.keys():
@@ -609,35 +708,29 @@ def list_rule_sets(ctx: click.Context, cache_path: str, custom: bool):
     required=True,
     multiple=True,
 )
+@click.option(
+    "--cdisc",
+    is_flag=True,
+    default=False,
+    help=(
+        "Flag to read dataset metadata with the CDISC (pandas) engine instead of the default SQL engine. "
+        "The SQL engine supports XPT and SAS7BDAT."
+    ),
+)
 @click.pass_context
-def list_dataset_metadata(ctx: click.Context, dataset_path: Tuple[str]):
+def list_dataset_metadata(ctx: click.Context, dataset_path: Tuple[str], cdisc: bool):
     """
     Command that lists metadata of given datasets.
 
-    Input:
-        core.py list-ds-metadata -dp=path_1 -dp=path_2 -dp=path_3 ...
-    Output:
-        [
-           {
-              "domain":"AE",
-              "filename":"ae.xpt",
-              "full_path":"/Users/Aleksei_Furmenkov/PycharmProjects/cdisc-rules-engine/resources/data/ae.xpt",
-              "file_size":"38000",
-              "label":"Adverse Events",
-              "modification_date":"2020-08-21T09:14:26"
-           },
-           {
-              "domain":"EX",
-              "filename":"ex.xpt",
-              "full_path":"/Users/Aleksei_Furmenkov/PycharmProjects/cdisc-rules-engine/resources/data/ex.xpt",
-              "file_size":"78050",
-              "label":"Exposure",
-              "modification_date":"2021-09-17T09:23:22"
-           },
-           ...
-        ]
+    Example:
+
+    python core.py list-dataset-metadata -dp path/to/ae.xpt -dp path/to/ex.xpt
+
+    Prints a JSON list with the domain, filename, full_path, file_size,
+    label and modification_date of each dataset.
     """
-    print(json.dumps(list_dataset_metadata_handler(dataset_path), indent=4))
+    handler = list_dataset_metadata_handler if cdisc else sql_list_dataset_metadata_handler
+    print(json.dumps(handler(dataset_path), indent=4))
 
 
 @click.command()
@@ -648,7 +741,7 @@ def version():
 @click.command()
 @click.option(
     "-c",
-    "--cache_path",
+    "--cache-path",
     default=DefaultFilePaths.CACHE.value,
     help="Relative path to cache files containing pre loaded metadata and rules",
 )

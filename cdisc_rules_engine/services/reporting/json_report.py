@@ -66,7 +66,7 @@ class JsonReport(BaseReport):
             "Conformance_Details": conformance_details,
             "Dataset_Details": [
                 {
-                    "filename": dataset.filename,
+                    "filename": self._display_dataset_name(dataset.filename),
                     "label": dataset.label,
                     # we don't currently store the below attributes in our metadata, so populating as blank for now
                     "path": str(Path(getattr(dataset, "full_path", ""))),
@@ -81,8 +81,14 @@ class JsonReport(BaseReport):
         if kwargs.get("raw_report") is True:
             json_export["results_data"] = [rule_result.to_representation() for rule_result in self._results]
         else:
-            json_export["Issue_Summary"] = self.get_summary_data()
-            json_export["Issue_Details"] = self.get_detailed_data()
+            issue_summary = self.get_summary_data()
+            issue_details = self.get_detailed_data()
+            for item in issue_summary:
+                item["dataset"] = self._display_dataset_name(item["dataset"])
+            for item in issue_details:
+                item["dataset"] = self._display_dataset_name(item["dataset"])
+            json_export["Issue_Summary"] = issue_summary
+            json_export["Issue_Details"] = issue_details
             json_export["Rules_Report"] = self.get_rules_report_data()
         return json_export
 
@@ -92,7 +98,7 @@ class JsonReport(BaseReport):
         if define_xml_path:
             define_version = get_define_version([define_xml_path])
         else:
-            define_version: str = self._args.define_version or get_define_version(self._args.dataset_paths)
+            define_version: str = self._args.define_version
         controlled_terminology = self._args.controlled_terminology_package
         if not controlled_terminology and define_version:
             if define_xml_path and define_version:
@@ -108,5 +114,6 @@ class JsonReport(BaseReport):
             dictionary_versions=dictionary_versions,
             substandard=(self._args.substandard if hasattr(self._args, "substandard") else None),
         )
+        self._create_output_dir()
         with open(self._output_name, "w") as f:
             json.dump(report_data, f)
